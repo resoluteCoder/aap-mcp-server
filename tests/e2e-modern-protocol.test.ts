@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createServer, type Server } from "node:http";
 import { parse as parseUrl } from "node:url";
-import { copyFileSync, existsSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 // Modern-era (2026-07-28) protocol opt-in coverage (AAP-90951).
@@ -31,6 +31,12 @@ const CLIENT_CAPABILITIES_META_KEY =
   "io.modelcontextprotocol/clientCapabilities";
 const CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo";
 const SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo";
+
+// serverInfo.version is sourced from package.json, so read it the same way
+// rather than pinning a literal that drifts on every release.
+const SERVER_VERSION: string = JSON.parse(
+  readFileSync(join(process.cwd(), "package.json"), "utf8"),
+).version;
 
 const mockUserData = {
   id: 1,
@@ -250,10 +256,15 @@ describe("End-to-End: Modern protocol (2026-07-28)", () => {
 
       const message = await readResult(response);
       // Spec PR #3002: servers SHOULD include serverInfo on every result.
-      // Sourced from the McpServer constructor's serverInfo.
+      // Sourced from the McpServer constructor's serverInfo, which is derived
+      // per toolset (AAPRFE-3082) — so the modern era carries the per-endpoint
+      // identity on every result, not just the handshake.
       expect(message.result._meta?.[SERVER_INFO_META_KEY]).toEqual({
-        name: "aap",
-        version: "0.1.0",
+        name: "aap-job-management",
+        title: "AAP Job Management",
+        version: SERVER_VERSION,
+        description:
+          "Launch, monitor, and manage jobs, job templates, workflows, and schedules",
       });
     });
 

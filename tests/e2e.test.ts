@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createServer, type Server } from "node:http";
 import { parse as parseUrl } from "node:url";
-import { copyFileSync, existsSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   Client,
@@ -465,6 +465,101 @@ describe("End-to-End: MCP Server", () => {
 
       await client.close();
       await transport.close();
+    }, 15000);
+  });
+
+  // --- Per-toolset serverInfo (AAPRFE-3082) ---
+
+  describe("Per-toolset serverInfo", () => {
+    // Every toolset endpoint used to answer initialize with the same
+    // {name:"aap", version:"0.1.0"}, so clients listed them as N identical
+    // rows. Each endpoint is a distinct MCP server from the client's side and
+    // must identify itself as one.
+    const TOOLSETS = [
+      "job_management",
+      "inventory_management",
+      "system_monitoring",
+      "user_management",
+      "security_compliance",
+      "platform_configuration",
+    ];
+
+    const serverInfoFor = async (toolset: string) => {
+      const { client, transport } = createMcpClient(toolset, BEARER_TOKEN);
+      await client.connect(transport);
+      const info = client.getServerVersion();
+      await client.close();
+      await transport.close();
+      return info;
+    };
+
+    it("advertises a unique name for every toolset endpoint", async () => {
+      const names: string[] = [];
+      for (const toolset of TOOLSETS) {
+        const info = await serverInfoFor(toolset);
+        expect(info?.name).toBeDefined();
+        names.push(info!.name);
+      }
+
+      // The regression the RFE reported: all six collapsing to one name.
+      expect(new Set(names).size).toBe(TOOLSETS.length);
+      expect(names).toEqual([
+        "aap-job-management",
+        "aap-inventory-management",
+        "aap-system-monitoring",
+        "aap-user-management",
+        "aap-security-compliance",
+        "aap-platform-configuration",
+      ]);
+    }, 30000);
+
+    it("advertises a human-readable title and description", async () => {
+      const info = await serverInfoFor("job_management");
+      expect(info).toMatchObject({
+        name: "aap-job-management",
+        title: "AAP Job Management",
+        description:
+          "Launch, monitor, and manage jobs, job templates, workflows, and schedules",
+      });
+    }, 15000);
+
+    it("reports the package version rather than a hard-coded one", async () => {
+      const { version } = JSON.parse(
+        readFileSync(join(process.cwd(), "package.json"), "utf8"),
+      );
+      const info = await serverInfoFor("job_management");
+      expect(info?.version).toBe(version);
+      expect(info?.version).not.toBe("0.1.0");
+    }, 15000);
+
+    it("leaves the aggregate /mcp endpoint on the base identity", async () => {
+      // Backwards compatibility for existing single-endpoint clients.
+      const transport = new StreamableHTTPClientTransport(
+        new URL(`${MCP_BASE_URL}/mcp`),
+        {
+          requestInit: {
+            headers: {
+              Authorization: `Bearer ${BEARER_TOKEN}`,
+              "mcp-protocol-version": "2025-06-18",
+            },
+          },
+        },
+      );
+      const client = new Client(
+        { name: "e2e-base-identity", version: "1.0.0" },
+        { capabilities: { tools: {} }, protocolVersion: "2025-06-18" },
+      );
+      await client.connect(transport);
+      expect(client.getServerVersion()?.name).toBe("aap");
+      await client.close();
+      await transport.close();
+    }, 15000);
+
+    it("does not reflect an unknown toolset back into serverInfo", async () => {
+      // `/:toolset/mcp` matches any path segment, so this value is untrusted.
+      const info = await serverInfoFor("not-a-real-toolset");
+      expect(info?.name).toBe("aap");
+      expect(JSON.stringify(info)).not.toContain("not-a-real-toolset");
     }, 15000);
   });
 

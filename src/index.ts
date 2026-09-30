@@ -18,6 +18,7 @@ import {
 } from "./extract-tools.js";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
+import { createRequire } from "module";
 import * as yaml from "js-yaml";
 import { metricsService } from "./metrics.js";
 import {
@@ -31,6 +32,7 @@ import { DISCOVER_TOOLS, handleDiscoverTool } from "./discover.js";
 import { JsonRpcErrorCode } from "./error-codes.js";
 import { createOriginValidationMiddleware } from "./middleware/origin-validation.js";
 import { resolveMcpPort } from "./port.js";
+import { buildServerIdentity, DEFAULT_SERVER_NAME } from "./server-identity.js";
 import {
   buildConfig,
   buildResourceMetadataUrl,
@@ -62,6 +64,21 @@ const loadConfig = (): AapMcpConfig => {
 // Load configuration
 const localConfig = loadConfig();
 
+// Server version advertised in serverInfo. Read from package.json rather than
+// hard-coded so it cannot drift from the shipped package (it previously said
+// "0.1.0" while package.json said "1.0.0"). Resolved relative to this module,
+// so it works from both src/ (tsx) and dist/ (published image).
+const SERVER_VERSION: string = (() => {
+  try {
+    const pkg = createRequire(import.meta.url)("../package.json") as {
+      version?: string;
+    };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return process.env.npm_package_version ?? "0.0.0";
+  }
+})();
+
 const MCP_PORT = resolveMcpPort(process.env.MCP_PORT);
 
 // Configuration constants (with priority: env var > config file > default)
@@ -69,6 +86,10 @@ const CONFIG = {
   BASE_URL: process.env.BASE_URL || localConfig.base_url || "https://localhost",
   MCP_PORT,
   MCP_SERVER_URL: process.env.MCP_SERVER_URL || `http://localhost:${MCP_PORT}`,
+  // Prefix for the per-toolset serverInfo identity (AAPRFE-3082). Each toolset
+  // endpoint advertises "<prefix>-<toolset>", so deployments running more than
+  // one AAP instance can tell their endpoints apart in a single client config.
+  MCP_SERVER_NAME: (process.env.MCP_SERVER_NAME || DEFAULT_SERVER_NAME).trim(),
   ANALYTICS_KEY: (
     process.env.ANALYTICS_KEY ||
     localConfig.analytics_key ||
@@ -462,11 +483,17 @@ const executeToolRequest = async (
 // Called once per request by createMcpHandler; closes over the per-request
 // RequestContext (toolset + identity) resolved from authInfo.extra.
 const createMcpServer = (requestCtx: RequestContext): McpServer => {
+  // serverInfo is derived per request from the toolset the URL path resolved to
+  // (AAPRFE-3082), so each endpoint identifies itself distinctly to the client
+  // instead of every endpoint reporting the same name. Unknown toolsets fall
+  // back to the base identity — see buildServerIdentity.
   const server = new McpServer(
-    {
-      name: "aap",
-      version: "0.1.0",
-    },
+    buildServerIdentity({
+      toolset: requestCtx.toolset,
+      version: SERVER_VERSION,
+      knownToolsets: Object.keys(allToolsets),
+      baseName: CONFIG.MCP_SERVER_NAME,
+    }),
     {
       capabilities: {
         // listChanged:false — we register tools statically and never emit

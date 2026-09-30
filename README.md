@@ -120,6 +120,16 @@ MCP_PORT=3000
 # Change this to true to get access to the write operations
 #ALLOW_WRITE_OPERATIONS=true
 
+# Prefix for the MCP server identity advertised to clients (default: "aap").
+# Each toolset endpoint reports its own serverInfo derived from this prefix —
+# /job_management/mcp advertises "aap-job-management" (title "AAP Job
+# Management"), /inventory_management/mcp advertises "aap-inventory-management",
+# and so on — so MCP clients can tell the endpoints apart instead of listing
+# them all under one name. The aggregate /mcp endpoint keeps the bare prefix.
+# Set this when running more than one AAP instance in a single client config,
+# e.g. MCP_SERVER_NAME=aap-prod yields "aap-prod-job-management".
+#MCP_SERVER_NAME=aap
+
 # Extra browser origins allowed for DNS-rebinding protection (comma-separated).
 # The gateway (BASE_URL) and localhost are always allowed; this is additive.
 # Also settable via `allowed_origins` in aap-mcp.yaml (env var takes precedence).
