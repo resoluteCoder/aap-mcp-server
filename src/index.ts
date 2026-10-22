@@ -28,12 +28,9 @@ import { AnalyticsService } from "./analytics.js";
 import { PseudoIdentityService, type UserInfo } from "./pseudo-identity.js";
 import { AapMcpConfig, loadToolsetsFromCfg } from "./config-utils.js";
 import { DISCOVER_TOOLS, handleDiscoverTool } from "./discover.js";
-import { loadSkills, type SkillCatalog } from "./skills-loader.js";
-import {
-  buildSkillsInstructions,
-  registerSkillHandlers,
-  SKILLS_CAPABILITIES,
-} from "./skills-server.js";
+import { loadSkills } from "@modelcontextprotocol/server/ext/skills/node";
+import type { SkillCatalog } from "@modelcontextprotocol/server/ext/skills";
+import { buildSkillsInstructions } from "./skills-instructions.js";
 import { JsonRpcErrorCode } from "./error-codes.js";
 import { createOriginValidationMiddleware } from "./middleware/origin-validation.js";
 import { resolveMcpPort } from "./port.js";
@@ -507,12 +504,20 @@ const createMcpServer = (requestCtx: RequestContext): McpServer => {
         // the SDK default listChanged to true, which would advertise a capability
         // we don't honor on server/discover; pin it false.
         tools: { listChanged: false },
-        // SEP-2640: advertise the skills extension only when we actually have
-        // skills to serve. Declaring it with an empty catalog would promise a
-        // surface with nothing behind it. Note the extension surfaces on both
-        // protocol eras — the modern server/discover result and the legacy
-        // initialize result — so this is not gated on protocol revision.
-        ...(skillCatalog.skills.length > 0 ? SKILLS_CAPABILITIES : {}),
+        // No skills capability here: SkillCatalog.attach() declares it, last,
+        // after it has registered every handler behind it — so the server
+        // never advertises skills it does not serve. See the attach call in
+        // createMcpServer below.
+        //
+        // resources is the one piece attach() leaves us to get right. It
+        // registers the skill:// template through registerResource, which
+        // defaults listChanged to true. The SDK supports a changing catalog —
+        // that is what SkillCatalog.reload() is for — but this server builds
+        // the catalog once at startup and never reloads it, so the
+        // notification would never come. Pin it false.
+        ...(skillCatalog && skillCatalog.entries.length > 0
+          ? { resources: { listChanged: false } }
+          : {}),
       },
       // SEP-2640's instructions pointer, the discovery mechanism the spec
       // defines alongside skills/list: name the skills we serve so a client
@@ -582,8 +587,12 @@ const createMcpServer = (requestCtx: RequestContext): McpServer => {
     return executeToolRequest(tool, args, requestCtx);
   });
 
-  if (skillCatalog.skills.length > 0) {
-    registerSkillHandlers(server, skillCatalog);
+  // Serve the skills on this request's server. attach() registers the skill://
+  // resource template, skills/list and skills/get, then declares the extension
+  // capability. It must run before the server is connected, which is exactly
+  // where this sits: createMcpHandler connects what this factory returns.
+  if (skillCatalog && skillCatalog.entries.length > 0) {
+    skillCatalog.attach(server);
   }
 
   return server;
@@ -784,20 +793,37 @@ const allTools: AAPMcpToolDefinition[] = await generateTools();
 const allToolsets = loadToolsetsFromCfg(allTools, localConfig);
 allToolsets["discover"] = [];
 
-// Skill catalog, built once at startup. The server is stateless per request, so
-// re-walking and re-hashing the tree per request would be pure waste. A missing
-// directory or an unservable skill yields a warning and a smaller catalog —
-// never a failed startup.
-const skillCatalog: SkillCatalog = loadSkills({
-  directory: CONFIG.SKILLS_PATH,
-  prefix: CONFIG.SKILLS_URI_PREFIX,
-});
+// Skill catalog, built once at startup and attached to each per-request
+// McpServer. The server is stateless per request, so re-walking and re-hashing
+// the tree per request would be pure waste; the SDK supports exactly this —
+// "One instance serves any number of servers: call attach on each".
+//
+// Default (non-strict) behaviour is what this server wants: a malformed or
+// oversized skill is skipped with a warning and the rest of the catalog still
+// serves. Startup never fails on bad content.
+const skillWarnings: string[] = [];
+const skillCatalog: SkillCatalog | undefined = CONFIG.SKILLS_PATH
+  ? await loadSkills(CONFIG.SKILLS_PATH, {
+      ...(CONFIG.SKILLS_URI_PREFIX
+        ? { prefix: CONFIG.SKILLS_URI_PREFIX }
+        : {}),
+      // The catalog is built once here and immutable for the life of the
+      // process, so its reads cache exactly like tools/list. The SDK defaults
+      // this to 0/private; without it, skills would be the only uncacheable
+      // surface on the server. Applies to skills/list, skills/get, directory
+      // reads and skill files alike — no per-method workaround needed.
+      cacheHint: { ttlMs: 300_000, cacheScope: "public" },
+      onWarning: (warning) =>
+        skillWarnings.push(`${warning.path}: ${warning.message}`),
+    })
+  : undefined;
 
 // Derived from the catalog and identical for every connection, so build it once
 // here rather than on each request alongside the McpServer that carries it.
-const skillsInstructions = CONFIG.SKILLS_INSTRUCTIONS
-  ? buildSkillsInstructions(skillCatalog)
-  : undefined;
+const skillsInstructions =
+  CONFIG.SKILLS_INSTRUCTIONS && skillCatalog
+    ? buildSkillsInstructions(skillCatalog)
+    : undefined;
 
 // Set up routes - POST only, no GET/DELETE (no sessions to stream or terminate)
 app.post("/mcp", (req, res) => mcpPostHandler(req, res));
@@ -956,20 +982,19 @@ async function main(): Promise<void> {
   // no way to tell a working catalog from an empty one without making an
   // authenticated request, so state the outcome either way.
   console.log("");
-  if (!CONFIG.SKILLS_PATH) {
+  if (!CONFIG.SKILLS_PATH || !skillCatalog) {
     console.log("Skills: disabled (no SKILLS_PATH or skills_path configured)");
-  } else if (skillCatalog.skills.length === 0) {
+  } else if (skillCatalog.entries.length === 0) {
     console.log(`Skills: none loaded from ${CONFIG.SKILLS_PATH}`);
     console.log(
-      "  The skills extension is NOT advertised. See warnings above for skipped skills.",
+      "  The skills extension is NOT advertised. See skipped skills below.",
     );
   } else {
-    const fileCount = skillCatalog.files.size;
     console.log(
-      `Skills: ${skillCatalog.skills.length} loaded from ${CONFIG.SKILLS_PATH} (${fileCount} files)`,
+      `Skills: ${skillCatalog.entries.length} loaded from ${CONFIG.SKILLS_PATH}`,
     );
-    for (const skill of skillCatalog.skills) {
-      console.log(`  ✓ ${skill.name} → ${skill.uri}`);
+    for (const skill of skillCatalog.entries) {
+      console.log(`  ✓ ${skill.frontmatter.name} → ${skill.uri}`);
     }
     console.log(
       "  Served from every MCP endpoint, including toolset-specific ones.",
@@ -983,6 +1008,21 @@ async function main(): Promise<void> {
       console.log(
         "  Instructions pointer OFF — only a SEP-2640 client will find these.",
       );
+    }
+  }
+
+  // A skipped skill is silent otherwise: the catalog simply comes back smaller.
+  // That is how a skill the loader rejects disappears without anyone noticing,
+  // so name every one of them and say plainly that it is not being served.
+  if (skillWarnings.length > 0) {
+    console.log("");
+    console.log(
+      `  ${skillWarnings.length} skill${
+        skillWarnings.length === 1 ? "" : "s"
+      } SKIPPED and NOT served:`,
+    );
+    for (const warning of skillWarnings) {
+      console.log(`  ✗ ${warning}`);
     }
   }
 

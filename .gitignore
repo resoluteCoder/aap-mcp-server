@@ -21,3 +21,6 @@ test-results.json
 
 # Others
 aap-mcp.yaml
+
+# Local SDK-from-main tarballs for the skills PoC (not for release)
+vendor/

@@ -244,9 +244,14 @@ describe("End-to-End: SEP-2640 skills", () => {
       const message = await call("server/discover");
       const capabilities = message.result.capabilities;
 
+      // directoryRead is not ours to choose: SkillCatalog.attach() derives it
+      // from whether the source implements readDirectory, and the catalog
+      // source does. So a catalog-backed server serves
+      // resources/directory/read and says so. Declining it would mean not
+      // using the catalog.
       expect(
         capabilities.extensions?.["io.modelcontextprotocol/skills"],
-      ).toEqual({ directoryRead: false });
+      ).toEqual({ directoryRead: true });
       // We register resources statically and never send
       // notifications/resources/list_changed, so advertising it would be a
       // promise we do not keep. The SDK defaults it to true.
@@ -311,10 +316,11 @@ describe("End-to-End: SEP-2640 skills", () => {
       }
     });
 
-    it("carries the cache hints it has to emit by hand", async () => {
-      // The SDK's cacheHints option gates on a closed list of six methods and
-      // silently drops a hint configured for a custom one, so skills/list sets
-      // these itself. A regression here is invisible without an assertion.
+    it("carries the cache hints configured on the catalog", async () => {
+      // One `cacheHint` on loadSkills covers skills/list, skills/get,
+      // directory reads and skill files together — no per-method workaround.
+      // It defaults to 0/private, so this asserts we actually set it: without
+      // it skills would be the only uncacheable surface on the server.
       const result = (await call("skills/list")).result;
       expect(result.ttlMs).toBe(300_000);
       expect(result.cacheScope).toBe("public");
@@ -416,12 +422,32 @@ describe("End-to-End: SEP-2640 skills", () => {
   });
 
   describe("resources/list", () => {
-    it("lists every file in the catalog", async () => {
+    it("lists one entry point per skill, not every file", async () => {
+      // The SDK advertises each skill's SKILL.md and stops there; reference
+      // files are reachable through the skill:// template but are not
+      // enumerated. That is progressive disclosure working as designed — the
+      // listing stays one line per skill however many files a skill carries.
+      //
+      // The consequence is an authoring constraint, not a serving bug: a
+      // client that never reads SKILL.md never learns a reference file
+      // exists, so a skill has to cite its own files. Asserted here because
+      // it is the behaviour a reader of this suite will otherwise assume
+      // wrongly.
       const message = await call("resources/list");
       expect(message.error).toBeUndefined();
-      expect(message.result.resources.map((r: any) => r.uri).sort()).toEqual(
-        [SKILL_URI, REFERENCE_URI].sort(),
-      );
+
+      const uris = message.result.resources.map((r: any) => r.uri);
+      expect(uris).toEqual([SKILL_URI]);
+      expect(uris).not.toContain(REFERENCE_URI);
+    });
+
+    it("still serves a reference file that resources/list does not advertise", async () => {
+      // The other half of the above: unlisted is not unreachable. If this
+      // failed, progressive disclosure would be broken rather than merely
+      // undiscoverable.
+      const message = await call("resources/read", { uri: REFERENCE_URI });
+      expect(message.error).toBeUndefined();
+      expect(message.result.contents[0].text).toBeTruthy();
     });
   });
 
