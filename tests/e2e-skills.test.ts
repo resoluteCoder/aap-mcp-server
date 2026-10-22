@@ -16,8 +16,9 @@ import { load as yamlLoad } from "js-yaml";
 
 // SEP-2640 skills served over HTTP, end to end.
 //
-// The loader's own tests (src/skills-loader.test.ts) cover catalog
-// construction. This file covers the half that only breaks on the wire: the
+// Catalog construction belongs to the SDK and is tested there; the pointer
+// built from it is covered by src/skills-instructions.test.ts. This file
+// covers the half that only breaks on the wire: the
 // result shapes, the capability declaration, and the two checks a conforming
 // host performs before it will load a skill — digest agreement and frontmatter
 // fidelity. A loader can be perfect and the server still unusable if

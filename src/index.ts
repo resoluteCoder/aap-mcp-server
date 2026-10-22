@@ -531,10 +531,9 @@ const createMcpServer = (requestCtx: RequestContext): McpServer => {
       cacheHints: {
         "tools/list": { ttlMs: 300_000, cacheScope: "public" },
         // The skill catalog is built once at startup and immutable thereafter,
-        // so its resources cache exactly like the tool list. Note this option
-        // only reaches the SDK's six cacheable methods — resources/list and
-        // resources/read are on that list, skills/list is not, which is why
-        // skills/list emits ttlMs and cacheScope by hand. See skills-server.ts.
+        // so its resources cache exactly like the tool list. This option only
+        // reaches the SDK's cacheable methods; skills/list and skills/get are
+        // covered by the catalog's own `cacheHint` instead — see loadSkills.
         "resources/list": { ttlMs: 300_000, cacheScope: "public" },
         "resources/read": { ttlMs: 300_000, cacheScope: "public" },
       },
